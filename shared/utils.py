@@ -5,11 +5,13 @@ from django.core.mail import EmailMessage
 from django.template.loader import render_to_string
 from rest_framework.exceptions import ValidationError
 # from decouple import config
-from twilio.rest import Client
+# from twilio.rest import Client
 
 email_regex = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b")
 phone_regex = re.compile(r"(\+[0-9]+\s*)?(\([0-9]+\))?[\s0-9\-]+[0-9]+")
-username_regex = re.compile(r"^[a-zA-Z0-9_.-]+$")
+# username_regex = re.compile(r"^[a-zA-Z0-9_.-]+$")
+regex_username = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,19}$")
+regex_firs_and_last_name = re.compile(r"^[a-zA-Z]{3,19}$")
 
 
 def check_email_or_phone(email_or_phone):
@@ -38,7 +40,7 @@ def check_user_type(user_input):
         user_input = 'email'
     elif re.fullmatch(phone_regex, user_input):
         user_input = 'phone'
-    elif re.fullmatch(username_regex, user_input):
+    elif re.fullmatch(regex_username, user_input):
         user_input = 'username'
     else:
         data = {
