@@ -1,15 +1,20 @@
 import datetime
 
-from django.shortcuts import render
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.generics import CreateAPIView, UpdateAPIView
 from rest_framework import permissions, status
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from shared.utils import send_email
 from users.models import User, NEW, CODE_VERIFIED, VIA_EMAIL, VIA_PHONE
-from users.serializers import SignUpSerializer, ChangeUserInformation, ChangeUserPhotoSerializer
+from django.core.exceptions import ObjectDoesNotExist
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from shared.utils import send_email, check_email_or_phone
+from .serializers import SignUpSerializer, ChangeUserInformation, ChangeUserPhotoSerializer, LoginSerializer, \
+    LoginRefreshSerializer, LogoutSerializer, ForgotPasswordSerializer, ResetPasswordSerializer
 
 
 # Create your views here.
@@ -24,7 +29,7 @@ class UserCreateView(CreateAPIView):
 class VerifyAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated, ]
 
-    def post(self, request, *args, **kwargs):
+    def post(self, request):
         user = request.user
         code = request.data.get('code')
 
@@ -39,7 +44,7 @@ class VerifyAPIView(APIView):
         )
 
     def check_verify(self, user, code):
-        verifyes = user.verify_codes.filter(expiration_time__gte=datetime.now(), code=code, is_confirmed=False)
+        verifyes = user.verify_codes.filter(expiration_time__gte=datetime.datetime.now(), code=code, is_confirmed=False)
         print(verifyes)
         if not verifyes.exists():
             data = {
@@ -81,7 +86,7 @@ class GetNewVerification(APIView):
 
     @staticmethod
     def check_verification(user):
-        verifies = user.verify_codes.filter(expiration_time__gte=datetime.now(), is_confirmed=False)
+        verifies = user.verify_codes.filter(expiration_time__gte=datetime.datetime.now(), is_confirmed=False)
         if verifies.exists():
             data = {
                 "message": "Tasdiqlash kodingiz ishlatish uchun yaroqli!"
@@ -133,27 +138,92 @@ class ChangeUserPhotoView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class LoginView(TokenObtainPairView):
+    serializer_class = LoginSerializer
+
+
+class LoginRefreshView(TokenRefreshView):
+    serializer_class = LoginRefreshSerializer
+
+
+class LogOutView(APIView):
+    serializer_class = LogoutSerializer
+    permission_classes = [IsAuthenticated, ]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.serializer_class(data=self.request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            refresh_token = self.request.data['refresh']
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+            data = {
+                'success': True,
+                'message': "You are loggout out"
+            }
+            return Response(data, status=205)
+        except TokenError:
+            return Response(status=400)
+
+
+class ForgotPasswordView(APIView):
+    permission_classes = [AllowAny, ]
+    serializer_class = ForgotPasswordSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.serializer_class(data=self.request.data)
+        serializer.is_valid(raise_exception=True)
+        email_or_phone = serializer.validated_data.get('email_or_phone')
+        user = serializer.validated_data.get('user')
+        if check_email_or_phone(email_or_phone) == 'phone':
+            code = user.create_verify_code(VIA_PHONE)
+            send_email(email_or_phone, code)
+        elif check_email_or_phone(email_or_phone) == 'email':
+            code = user.create_verify_code(VIA_EMAIL)
+            send_email(email_or_phone, code)
+
+        return Response(
+            {
+                "success": True,
+                'message': "Tasdiqlash kodi muvaffaqiyatli yuborildi",
+                "access": user.token()['access'],
+                "refresh": user.token()['refresh_token'],
+                "user_status": user.auth_status,
+            }, status=200
+        )
+
+
+class ResetPasswordView(UpdateAPIView):
+    serializer_class = ResetPasswordSerializer
+    permission_classes = [IsAuthenticated, ]
+    http_method_names = ['patch', 'put']
+
+    def get_object(self):
+        return self.request.user
+
+    def update(self, request, *args, **kwargs):
+        response = super(ResetPasswordView, self).update(request, *args, **kwargs)
+        try:
+            user = User.objects.get(id=response.data.get('id'))
+        except ObjectDoesNotExist as e:
+            raise NotFound(detail='User not found')
+        return Response(
+            {
+                'success': True,
+                'message': "Parolingiz muvaffaqiyatli o'zgartirildi",
+                'access': user.token()['access'],
+                'refresh': user.token()['refresh_token'],
+            }
+        )
+
+
 class UserVerification(APIView):
     permission_classes = [permissions.IsAuthenticated, ]
 
     def post(self, request):
-        data = request.data
-        try:
-            validated_username = self.validate_username(data.get("username"))
-        except ValidationError as e:
-            return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            validated_first_name = self.validate_first_name(data.get("first_name"))
-        except ValidationError as e:
-            return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            validated_last_name = self.validate_last_name(data.get("last_name"))
-        except ValidationError as e:
-            return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
-
-        user = User.objects.create(username=validated_username, first_name=validated_first_name,
-                                   last_name=validated_last_name)
-        serializer = SignUpSerializer(user)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        serializer = SignUpSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
